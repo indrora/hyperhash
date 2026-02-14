@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
-	github.com/indrora/toil v0.0.0-20260213221608-16de6acde4a7
+	github.com/indrora/toil v0.1.0
 	github.com/schollz/progressbar/v3 v3.19.0
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/crypto v0.48.0
