@@ -29,9 +29,10 @@ import (
 )
 
 type hashable struct {
-	Path  string
-	Hash  []byte
-	Valid bool
+	Path      string
+	Hash      []byte
+	CheckHash []byte
+	Valid     bool
 }
 
 var hashFuncs = map[string]crypto.Hash{
@@ -61,6 +62,7 @@ func main() {
 		hashType   *string = pflag.String("hash-type", "sha256", "The type of hash to compute (e.g., sha256, md5)")
 		verify     *bool   = pflag.Bool("verify", false, "Verify the computed hashes against existing hash values")
 		numWorkers *int    = pflag.Int("workers", 0, "Number of worker goroutines to use (default is number of CPU cores)")
+		verbose    *bool   = pflag.BoolP("verbose", "v", false, "Enable verbose output")
 		inputGlob  []string
 		help       *bool = pflag.BoolP("help", "h", false, "Show help message")
 	)
@@ -158,29 +160,34 @@ func main() {
 		if _, err := io.Copy(hasher, file); err != nil {
 			return h, err
 		}
-		hashValue = hasher.Sum(nil)
-
+		h.Hash = hasher.Sum(nil)
 		if *verify {
-			h.Valid = slices.Equal(hashValue, h.Hash)
-			return h, nil
+			h.Valid = slices.Equal(h.CheckHash, h.Hash)
 		} else {
-			h.Hash = hashValue
 			h.Valid = true
-			return h, nil
 		}
+		return h, nil
 
 	}
 
-	files, _ = toil.ParallelTransform(files, cHash, toil.Options{}.WithWorkers(*numWorkers))
+	files, err := toil.ParallelTransform(files, cHash, toil.Options{}.WithWorkers(*numWorkers))
+	if err != nil {
+		panic(fmt.Sprintf("Error computing hashes: %v", err))
+	}
 
 	// Output the results
 	for _, h := range files {
 
 		if *verify {
-			if h.Valid {
-				fmt.Printf("%s: OK\n", h.Path)
+			if *verbose {
+				fmt.Printf("%s: computed hash %x, expected hash %x\n", h.Path, h.Hash, h.CheckHash)
 			} else {
-				fmt.Printf("%s: MISMATCH\n", h.Path)
+
+				if h.Valid {
+					fmt.Printf("%s: OK\n", h.Path)
+				} else {
+					fmt.Printf("%s: MISMATCH\n", h.Path)
+				}
 			}
 		} else {
 			if h.Hash == nil {
@@ -221,7 +228,10 @@ func collectFilesFromFile(filePath string) ([]hashable, error) {
 	// The format is expected to be: <hash> <path>
 	for scanner.Scan() {
 		line := scanner.Text()
-		parts := strings.SplitN(line, " ", 2)
+		if strings.HasPrefix(strings.TrimSpace(line), "#") || strings.TrimSpace(line) == "" {
+			continue // Skip comments and empty lines
+		}
+		parts := strings.Fields(line)
 		if len(parts) != 2 {
 			continue // Skip lines that don't match the expected format
 		}
@@ -232,7 +242,7 @@ func collectFilesFromFile(filePath string) ([]hashable, error) {
 			continue // Skip lines with invalid hash values
 		}
 
-		files = append(files, hashable{Path: parts[1], Hash: hashValue})
+		files = append(files, hashable{Path: parts[1], CheckHash: hashValue})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading file '%s': %v", filePath, err)
