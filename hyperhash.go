@@ -6,8 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -57,76 +57,120 @@ var hashFuncs = map[string]crypto.Hash{
 	"BLAKE2S-256": crypto.BLAKE2s_256,
 }
 
+func usage() {
+	fmt.Fprintf(os.Stderr, "Usage: %s [options] <file1> <file2> ...\n", os.Args[0])
+	fmt.Fprintln(os.Stderr, "Options:")
+	pflag.PrintDefaults()
+
+	// Print a list of available hash functions
+	fmt.Println("\nAvailable hash functions:")
+	for name := range hashFuncs {
+		// print it lowercase for user-friendliness
+		lowerName := strings.ToLower(name)
+		fmt.Printf("  - %s\n", lowerName)
+	}
+
+	os.Exit(0)
+}
+
 func main() {
 	var (
-		hashType   *string = pflag.String("hash-type", "sha256", "The type of hash to compute (e.g., sha256, md5)")
-		verify     *bool   = pflag.Bool("verify", false, "Verify the computed hashes against existing hash values")
-		numWorkers *int    = pflag.Int("workers", 0, "Number of worker goroutines to use (default is number of CPU cores)")
-		verbose    *bool   = pflag.BoolP("verbose", "v", false, "Enable verbose output")
-		inputGlob  []string
-		help       *bool = pflag.BoolP("help", "h", false, "Show help message")
+		// helpfunc
+		help *bool = pflag.BoolP("help", "h", false, "Show help message")
+		// TODO: Should we require this? Or continue to default to SHA256 if not provided?
+		hashType *string = pflag.StringP("type", "t", "sha256", "The type of hash to compute (e.g., sha256, md5)")
+		// Most of the UNIX utilities use -c/--check for this functionality, so we should probably follow that convention.
+		// TODO: Is there a POSIX standard for this? If so, we should follow that.
+		verify *bool = pflag.BoolP("verify", "c", false, "Verify the computed hashes against existing hash values")
+		// Could use a shorthand.
+		numWorkers *int = pflag.Int("workers", 0, "Number of worker goroutines to use (default is number of CPU cores)")
+		// More "debug" but useful for smaller sets of files.
+		verbose *bool = pflag.BoolP("verbose", "v", false, "Enable verbose output")
+		// Quiet
+		quiet *bool = pflag.BoolP("quiet", "q", false, "Do not print any non-error output")
+
+		// Progress bars?
+		progress *bool = pflag.BoolP("progress", "p", false, "Show progress bars")
+		// Files to hash (or checksum files to verify)
+		inputGlob []string
 	)
+
+	// Diagnostic messages and errors go to stderr; This specifies if we should print to stdout or io.Discard for messages about hash verification results.
+	oFile := os.Stdout
+
 	pflag.Parse()
 
 	if *help {
-		pflag.Usage()
+		usage()
 
-		// Print a list of available hash functions
-		fmt.Println("\nAvailable hash functions:")
-		for name := range hashFuncs {
-			// print it lowercase for user-friendliness
-			lowerName := strings.ToLower(name)
-			fmt.Printf("  - %s\n", lowerName)
-		}
-
-		return
 	}
 
 	inputGlob = pflag.Args()
 
 	if len(inputGlob) == 0 {
-		panic("At least one input glob pattern must be provided")
+		fmt.Fprintln(os.Stderr, "Error: No input files specified")
+		usage()
 	}
 
 	*hashType = strings.ToUpper(*hashType)
 
 	if _, ok := hashFuncs[*hashType]; !ok {
-		panic("Unsupported hash type: " + *hashType)
+		fmt.Fprintf(os.Stderr, "Error: Unsupported hash type: %s\n", *hashType)
+		usage()
 	}
 
 	hashFunc := hashFuncs[*hashType]
 
 	var files []hashable
+
+	paths, err := collectToHash(inputGlob)
+	if err != nil {
+
+		fmt.Fprintf(os.Stderr, "Error while collecting files: %v\n", err)
+
+		os.Exit(1)
+	}
+
 	if *verify {
-		for _, name := range inputGlob {
-			filesFromFile, err := collectFilesFromFile(name)
-			if err != nil {
-				panic(fmt.Sprintf("Error collecting files from '%s': %v", name, err))
-			}
-			files = append(files, filesFromFile...)
-		}
-	} else {
-		var err error
-		files, err = collectFiles(inputGlob)
+		files, err = checksums2hashables(paths)
 		if err != nil {
-			panic(fmt.Sprintf("Error collecting files: %v", err))
+			fmt.Fprintf(os.Stderr, "Error collecting checksums: %v\n", err)
+			os.Exit(1)
 		}
-	}
-
-	bar := progressbar.Default(int64(len(files)), "")
-	if *verify {
-		bar.Describe("Verifying files")
 	} else {
-		bar.Describe("Hashing files")
+		files = files2hashables(paths)
 	}
 
+	files = slices.DeleteFunc(files, func(h hashable) bool {
+
+		return h.Path == "" // no file on disk...
+	})
+
+	if !*quiet {
+		fmt.Fprintf(os.Stderr, "Hashing %d files with %s...\n", len(files), *hashType)
+	}
+
+	var bar *progressbar.ProgressBar = nil
+
+	if !*quiet && *progress {
+
+		bar := progressbar.Default(int64(len(files)), "")
+		if *verify {
+			bar.Describe("Verifying files")
+		} else {
+			bar.Describe("Hashing files")
+		}
+		defer bar.Close()
+	}
 	// Compute the hash for each file
 	cHash := func(h hashable) (hashable, error) {
 		var hashValue []byte
 
 		hasher := hashFunc.New()
 
-		bar.Add(1)
+		if bar != nil {
+			bar.Add(1)
+		}
 
 		// Don't hash directories, symlinks, named pipes, or sockets
 		info, err := os.Stat(h.Path)
@@ -170,53 +214,96 @@ func main() {
 
 	}
 
-	files, err := toil.ParallelTransform(files, cHash, toil.Options{}.WithWorkers(*numWorkers))
+	files, err = toil.ParallelTransform(files, cHash, toil.Options{}.WithWorkers(*numWorkers))
 	if err != nil {
-		panic(fmt.Sprintf("Error computing hashes: %v", err))
+		fmt.Fprintf(os.Stderr, "Error computing hashes: %v\n", err)
+		os.Exit(1)
 	}
+
+	pass := true
 
 	// Output the results
 	for _, h := range files {
 
 		if *verify {
 			if *verbose {
-				fmt.Printf("%s: computed hash %x, expected hash %x\n", h.Path, h.Hash, h.CheckHash)
+				fmt.Fprintf(os.Stderr, "%s: computed hash %x, expected hash %x\n", h.Path, h.Hash, h.CheckHash)
 			} else {
 
 				if h.Valid {
-					fmt.Printf("%s: OK\n", h.Path)
+					fmt.Fprintf(oFile, "%s: OK\n", h.Path)
 				} else {
-					fmt.Printf("%s: MISMATCH\n", h.Path)
+					fmt.Fprintf(oFile, "%s: MISMATCH\n", h.Path)
+					pass = false
 				}
 			}
 		} else {
 			if h.Hash == nil {
 				continue
 			}
-			fmt.Printf("%x  %s\n", h.Hash, h.Path)
+			fmt.Fprintf(os.Stdout, "%x  %s\n", h.Hash, h.Path)
 		}
 	}
+	if *verify && !pass {
+		os.Exit(1)
+	}
+
 }
 
-func collectFiles(patterns []string) ([]hashable, error) {
-	var files []hashable
-	for _, pattern := range patterns {
-		root, pat := doublestar.SplitPattern(pattern)
-		err := doublestar.GlobWalk(os.DirFS(root), pat, func(path string, d fs.DirEntry) error {
-			if d.IsDir() {
-				return nil
-			}
-			files = append(files, hashable{Path: root + "/" + path})
-			return nil
-		})
+func collectToHash(globs []string) ([]string, error) {
+	var files []string
+	for _, pattern := range globs {
+		matches, err := doublestar.FilepathGlob(pattern)
 		if err != nil {
-			return nil, fmt.Errorf("error processing glob pattern '%s': %v", pattern, err)
+			return nil, fmt.Errorf("error globbing pattern '%s': %v", pattern, err)
 		}
+		files = append(files, matches...)
 	}
 	return files, nil
 }
 
-func collectFilesFromFile(filePath string) ([]hashable, error) {
+func files2hashables(files []string) []hashable {
+	hashables := make([]hashable, len(files))
+	for i, file := range files {
+		// Check that it isn't a directory, symlink, named pipe, or socket. If it is, we won't hash it.
+		info, err := os.Stat(file)
+
+		if err != nil {
+			continue
+		}
+
+		if info.IsDir() || info.Mode()&os.ModeNamedPipe != 0 || info.Mode()&os.ModeSocket != 0 {
+			continue
+		}
+		// If it's a symlink, check if the file exists. If it doesn't, we won't hash it.
+		if info.Mode()&os.ModeSymlink != 0 {
+			targetPath, err := os.Readlink(file)
+			if err != nil {
+				continue
+			}
+			if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+				continue
+			}
+		}
+
+		hashables[i] = hashable{Path: file}
+	}
+	return hashables
+}
+
+func checksums2hashables(files []string) ([]hashable, error) {
+	var hashables []hashable
+	for _, file := range files {
+		hashablesFromFile, err := collectChecksums(file)
+		if err != nil {
+			return nil, fmt.Errorf("error collecting checksums from '%s': %v", file, err)
+		}
+		hashables = append(hashables, hashablesFromFile...)
+	}
+	return hashables, nil
+}
+
+func collectChecksums(filePath string) ([]hashable, error) {
 	var files []hashable
 	f, err := os.Open(filePath)
 	if err != nil {
@@ -225,24 +312,35 @@ func collectFilesFromFile(filePath string) ([]hashable, error) {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
+	hashPattern := regexp.MustCompile(`^([a-fA-F0-9]+)\s+(.+)$`)
+
 	// The format is expected to be: <hash> <path>
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(strings.TrimSpace(line), "#") || strings.TrimSpace(line) == "" {
 			continue // Skip comments and empty lines
 		}
-		parts := strings.Fields(line)
-		if len(parts) != 2 {
+
+		// Split the line into hash and path.
+
+		matches := hashPattern.FindStringSubmatch(line)
+		if len(matches) != 3 {
 			continue // Skip lines that don't match the expected format
 		}
 
-		filePatth := parts[0]
-		hashValue, err := hex.DecodeString(filePatth)
+		fileHash := matches[1]
+		filePath := matches[2]
+
+		if filePath == "" {
+			continue // Skip lines with empty file path
+		}
+
+		hashValue, err := hex.DecodeString(fileHash)
 		if err != nil {
 			continue // Skip lines with invalid hash values
 		}
 
-		files = append(files, hashable{Path: parts[1], CheckHash: hashValue})
+		files = append(files, hashable{Path: filePath, CheckHash: hashValue})
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading file '%s': %v", filePath, err)
