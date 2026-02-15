@@ -1,17 +1,15 @@
 package main
 
 import (
-	"bufio"
 	"crypto"
-	"encoding/hex"
+
 	"fmt"
 	"io"
 	"os"
-	"regexp"
+
 	"slices"
 	"strings"
 
-	"github.com/bmatcuk/doublestar/v4"
 	"github.com/indrora/toil"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/pflag"
@@ -36,21 +34,28 @@ type hashable struct {
 }
 
 var hashFuncs = map[string]crypto.Hash{
-	"MD4":    crypto.MD4,
-	"MD5":    crypto.MD5,
-	"SHA1":   crypto.SHA1,
+
+	// The old-school ones.
+	"MD4":       crypto.MD4,
+	"RIPEMD160": crypto.RIPEMD160,
+
+	// Dead but still used
+	"MD5":  crypto.MD5,
+	"SHA1": crypto.SHA1,
+
+	// "It's not broken yet"
 	"SHA224": crypto.SHA224,
 	"SHA256": crypto.SHA256,
 	"SHA384": crypto.SHA384,
 	"SHA512": crypto.SHA512,
 
-	"RIPEMD160": crypto.RIPEMD160,
-
+	// The new kids on the block.
 	"SHA3-224": crypto.SHA3_224,
 	"SHA3-256": crypto.SHA3_256,
 	"SHA3-384": crypto.SHA3_384,
 	"SHA3-512": crypto.SHA3_512,
 
+	// BLAKE2: What SHA3 should have been.
 	"BLAKE2B-256": crypto.BLAKE2b_256,
 	"BLAKE2B-384": crypto.BLAKE2b_384,
 	"BLAKE2B-512": crypto.BLAKE2b_512,
@@ -96,13 +101,18 @@ func main() {
 	)
 
 	// Diagnostic messages and errors go to stderr; This specifies if we should print to stdout or io.Discard for messages about hash verification results.
-	oFile := os.Stdout
+
+	var oFile io.Writer = os.Stdout
 
 	pflag.Parse()
 
 	if *help {
 		usage()
 
+	}
+
+	if *quiet {
+		oFile = io.Discard
 	}
 
 	inputGlob = pflag.Args()
@@ -248,102 +258,4 @@ func main() {
 		os.Exit(1)
 	}
 
-}
-
-func collectToHash(globs []string) ([]string, error) {
-	var files []string
-	for _, pattern := range globs {
-		matches, err := doublestar.FilepathGlob(pattern)
-		if err != nil {
-			return nil, fmt.Errorf("error globbing pattern '%s': %v", pattern, err)
-		}
-		files = append(files, matches...)
-	}
-	return files, nil
-}
-
-func files2hashables(files []string) []hashable {
-	hashables := make([]hashable, len(files))
-	for i, file := range files {
-		// Check that it isn't a directory, symlink, named pipe, or socket. If it is, we won't hash it.
-		info, err := os.Stat(file)
-
-		if err != nil {
-			continue
-		}
-
-		if info.IsDir() || info.Mode()&os.ModeNamedPipe != 0 || info.Mode()&os.ModeSocket != 0 {
-			continue
-		}
-		// If it's a symlink, check if the file exists. If it doesn't, we won't hash it.
-		if info.Mode()&os.ModeSymlink != 0 {
-			targetPath, err := os.Readlink(file)
-			if err != nil {
-				continue
-			}
-			if _, err := os.Stat(targetPath); os.IsNotExist(err) {
-				continue
-			}
-		}
-
-		hashables[i] = hashable{Path: file}
-	}
-	return hashables
-}
-
-func checksums2hashables(files []string) ([]hashable, error) {
-	var hashables []hashable
-	for _, file := range files {
-		hashablesFromFile, err := collectChecksums(file)
-		if err != nil {
-			return nil, fmt.Errorf("error collecting checksums from '%s': %v", file, err)
-		}
-		hashables = append(hashables, hashablesFromFile...)
-	}
-	return hashables, nil
-}
-
-func collectChecksums(filePath string) ([]hashable, error) {
-	var files []hashable
-	f, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("error opening file '%s': %v", filePath, err)
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	hashPattern := regexp.MustCompile(`^([a-fA-F0-9]+)\s+(.+)$`)
-
-	// The format is expected to be: <hash> <path>
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(strings.TrimSpace(line), "#") || strings.TrimSpace(line) == "" {
-			continue // Skip comments and empty lines
-		}
-
-		// Split the line into hash and path.
-
-		matches := hashPattern.FindStringSubmatch(line)
-		if len(matches) != 3 {
-			continue // Skip lines that don't match the expected format
-		}
-
-		fileHash := matches[1]
-		filePath := matches[2]
-
-		if filePath == "" {
-			continue // Skip lines with empty file path
-		}
-
-		hashValue, err := hex.DecodeString(fileHash)
-		if err != nil {
-			continue // Skip lines with invalid hash values
-		}
-
-		files = append(files, hashable{Path: filePath, CheckHash: hashValue})
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading file '%s': %v", filePath, err)
-	}
-	return files, nil
 }
