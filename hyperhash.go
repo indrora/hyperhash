@@ -2,10 +2,13 @@ package main
 
 import (
 	"crypto"
+	"runtime"
+	"time"
 
 	"fmt"
 	"io"
 	"os"
+	"sync/atomic"
 
 	"slices"
 	"strings"
@@ -160,27 +163,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Hashing %d files with %s...\n", len(files), *hashType)
 	}
 
-	var bar *progressbar.ProgressBar = nil
+	counter := atomic.Int64{}
+	counter.Store(0)
+	mismatch := atomic.Bool{}
+	mismatch.Store(false) // Start with a clean slate for mismatch status
 
-	if !*quiet && *progress {
-
-		bar := progressbar.Default(int64(len(files)), "")
-		if *verify {
-			bar.Describe("Verifying files")
-		} else {
-			bar.Describe("Hashing files")
-		}
-		defer bar.Close()
-	}
 	// Compute the hash for each file
 	cHash := func(h hashable) (hashable, error) {
 		var hashValue []byte
 
 		hasher := hashFunc.New()
 
-		if bar != nil {
-			bar.Add(1)
-		}
+		counter.Add(1)
 
 		// Don't hash directories, symlinks, named pipes, or sockets
 		info, err := os.Stat(h.Path)
@@ -217,6 +211,7 @@ func main() {
 		h.Hash = hasher.Sum(nil)
 		if *verify {
 			h.Valid = slices.Equal(h.CheckHash, h.Hash)
+			mismatch.CompareAndSwap(false, h.Valid == false)
 		} else {
 			h.Valid = true
 		}
@@ -224,13 +219,61 @@ func main() {
 
 	}
 
-	files, err = toil.ParallelTransform(files, cHash, toil.Options{}.WithWorkers(*numWorkers))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error computing hashes: %v\n", err)
-		os.Exit(1)
+	finished := make(chan bool) // For progress bar to know when we're done
+
+	if *progress {
+		// Progress bar is run in a separate goroutine
+		// since internally it uses a mutex.
+		go func() {
+			bar := progressbar.NewOptions64(int64(len(files)),
+				progressbar.OptionFullWidth(),
+				progressbar.OptionSetDescription("Hashing files"),
+				progressbar.OptionThrottle(50*time.Millisecond),
+				progressbar.OptionSetPredictTime(true),
+				progressbar.OptionShowCount(),
+			)
+
+			bar.RenderBlank()
+			if *verify {
+				bar.Describe("Verifying files")
+			} else {
+				bar.Describe("Hashing files")
+			}
+
+			last := counter.Load()
+			for {
+				select {
+				default:
+					if counter.Load() != last {
+						last = counter.Load()
+						bar.Set64(last)
+					} else {
+						// Don't burn CPU if nothing has changed since the last check
+						runtime.Gosched()
+					}
+				case <-finished:
+					bar.Exit()
+					bar.Clear()
+					return
+				}
+			}
+		}()
 	}
 
-	pass := true
+	files, err = toil.ParallelTransform(files, cHash, toil.Options{}.WithWorkers(*numWorkers))
+
+	finished <- true
+	close(finished)
+
+	if !*quiet {
+		fmt.Fprintf(os.Stderr, "Complete: %v files hashed\n", counter.Load())
+	}
+	if err != nil {
+		if !*quiet {
+			fmt.Fprintf(os.Stderr, "Error computing hashes: %v\n", err)
+		}
+		os.Exit(1)
+	}
 
 	// Output the results
 	for _, h := range files {
@@ -244,7 +287,6 @@ func main() {
 					fmt.Fprintf(oFile, "%s: OK\n", h.Path)
 				} else {
 					fmt.Fprintf(oFile, "%s: MISMATCH\n", h.Path)
-					pass = false
 				}
 			}
 		} else {
@@ -254,8 +296,10 @@ func main() {
 			fmt.Fprintf(os.Stdout, "%x  %s\n", h.Hash, h.Path)
 		}
 	}
-	if *verify && !pass {
+	if *verify && mismatch.Load() {
 		os.Exit(1)
+	} else {
+		os.Exit(0)
 	}
 
 }
