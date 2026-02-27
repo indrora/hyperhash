@@ -27,6 +27,8 @@ import (
 	_ "golang.org/x/crypto/blake2s"
 	_ "golang.org/x/crypto/md4"
 	_ "golang.org/x/crypto/ripemd160"
+
+	"github.com/earthboundkid/versioninfo/v2"
 )
 
 type hashable struct {
@@ -65,22 +67,6 @@ var hashFuncs = map[string]crypto.Hash{
 	"BLAKE2S-256": crypto.BLAKE2s_256,
 }
 
-func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s [options] <file1> <file2> ...\n", os.Args[0])
-	fmt.Fprintln(os.Stderr, "Options:")
-	pflag.PrintDefaults()
-
-	// Print a list of available hash functions
-	fmt.Println("\nAvailable hash functions:")
-	for name := range hashFuncs {
-		// print it lowercase for user-friendliness
-		lowerName := strings.ToLower(name)
-		fmt.Printf("  - %s\n", lowerName)
-	}
-
-	os.Exit(0)
-}
-
 func main() {
 	var (
 		// helpfunc
@@ -96,7 +82,8 @@ func main() {
 		verbose *bool = pflag.BoolP("verbose", "v", false, "Enable verbose output")
 		// Quiet
 		quiet *bool = pflag.BoolP("quiet", "q", false, "Do not print any non-error output")
-
+		// Version
+		version *bool = pflag.BoolP("version", "V", false, "Show version information")
 		// Progress bars?
 		progress *bool = pflag.BoolP("progress", "p", false, "Show progress bars")
 		// Files to hash (or checksum files to verify)
@@ -105,6 +92,8 @@ func main() {
 
 	// Diagnostic messages and errors go to stderr; This specifies if we should print to stdout or io.Discard for messages about hash verification results.
 
+	versioninfo.AddFlag(nil)
+
 	var oFile io.Writer = os.Stdout
 
 	pflag.Parse()
@@ -112,6 +101,10 @@ func main() {
 	if *help {
 		usage()
 
+	}
+	if *version {
+		fmt.Println(versioninfo.Short())
+		os.Exit(0)
 	}
 
 	if *quiet {
