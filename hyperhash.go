@@ -67,6 +67,8 @@ var hashFuncs = map[string]crypto.Hash{
 	"BLAKE2S-256": crypto.BLAKE2s_256,
 }
 
+var oFile io.Writer = os.Stdout
+
 func main() {
 	var (
 		// helpfunc
@@ -93,8 +95,6 @@ func main() {
 	// Diagnostic messages and errors go to stderr; This specifies if we should print to stdout or io.Discard for messages about hash verification results.
 
 	versioninfo.AddFlag(nil)
-
-	var oFile io.Writer = os.Stdout
 
 	pflag.Parse()
 
@@ -155,6 +155,8 @@ func main() {
 	if !*quiet {
 		fmt.Fprintf(os.Stderr, "Hashing %d files with %s...\n", len(files), *hashType)
 	}
+
+	// Start the actual hashing.
 
 	counter := atomic.Int64{}
 	counter.Store(0)
