@@ -1,0 +1,40 @@
+name: Run release
+on:
+  push:
+    tags: -'v*.*.*'
+    branches-ignore:
+      - "*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  statuses: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-file: go.sum
+          token: ${{github.token}}
+      - name: Giftwrap it up
+        run: go tool giftwrap release default insecure
+      - name: "Create Github release"
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          working_directory: _dist
+          files: |
+            *.zip
+            *.tar.gz
