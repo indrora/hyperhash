@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto"
 	"runtime"
 	"time"
 
@@ -17,17 +16,6 @@ import (
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/pflag"
 
-	// Register the hash functions we want to support
-	_ "crypto/md5"
-	_ "crypto/sha1"
-	_ "crypto/sha256"
-	_ "crypto/sha512"
-
-	_ "golang.org/x/crypto/blake2b"
-	_ "golang.org/x/crypto/blake2s"
-	_ "golang.org/x/crypto/md4"
-	_ "golang.org/x/crypto/ripemd160"
-
 	"github.com/earthboundkid/versioninfo/v2"
 )
 
@@ -36,35 +24,6 @@ type hashable struct {
 	Hash      []byte
 	CheckHash []byte
 	Valid     bool
-}
-
-var hashFuncs = map[string]crypto.Hash{
-
-	// The old-school ones.
-	"MD4":       crypto.MD4,
-	"RIPEMD160": crypto.RIPEMD160,
-
-	// Dead but still used
-	"MD5":  crypto.MD5,
-	"SHA1": crypto.SHA1,
-
-	// "It's not broken yet"
-	"SHA224": crypto.SHA224,
-	"SHA256": crypto.SHA256,
-	"SHA384": crypto.SHA384,
-	"SHA512": crypto.SHA512,
-
-	// The new kids on the block.
-	"SHA3-224": crypto.SHA3_224,
-	"SHA3-256": crypto.SHA3_256,
-	"SHA3-384": crypto.SHA3_384,
-	"SHA3-512": crypto.SHA3_512,
-
-	// BLAKE2: What SHA3 should have been.
-	"BLAKE2B-256": crypto.BLAKE2b_256,
-	"BLAKE2B-384": crypto.BLAKE2b_384,
-	"BLAKE2B-512": crypto.BLAKE2b_512,
-	"BLAKE2S-256": crypto.BLAKE2s_256,
 }
 
 var oFile io.Writer = os.Stdout
