@@ -1,0 +1,14 @@
+name: hyperhash
+nameTemplate: "{{.Name}}-{{.Version}}-{{.OS}}-{{.Arch}}"
+targets:
+  default:
+    package: github.com/indrora/hyperhash
+    platforms:
+    - linux/arm64
+    - linux/amd64
+    - darwin/arm64
+    - darwin/amd64
+    - windows/arm64
+    - windows/amd64
+    - windows/386
+    - linux/386
